@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package chat;
+
+
+// Define the Chat Service
+service ChatService {
+    // Account Management
+    rpc Register (RegisterRequest) returns (RegisterResponse);
+    rpc Login (LoginRequest) returns (LoginResponse);
+
+    // Messaging
+    rpc RetrieveUndeliveredMessages (UndeliveredMessagesRequest) returns (UndeliveredMessagesResponse);
+    rpc DeleteMessage (DeleteMessageRequest) returns (DeleteMessageResponse);
+
+    // Real-time Chat (Bidirectional Streaming)
+    rpc ChatStream (stream ChatMessage) returns (stream ChatMessage);
+
+    // User Search by Wildcard
+    rpc SearchUsers (SearchUsersRequest) returns (SearchUsersResponse);
+}
+
+// --------- Account Management Messages ---------
+message RegisterRequest {
+    string username = 1;
+    string password = 2;
+}
+
+message RegisterResponse {
+    bool success = 1;
+    string message = 2;  // "User created successfully" or "Username already exists"
+}
+
+message LoginRequest {
+    string username = 1;
+    string password = 2;
+}
+
+message LoginResponse {
+    bool success = 1;
+    string session_token = 2;  // A token for session management
+    string message = 3;  // Error message if failed
+}
+
+// --------- Chat Messaging ---------
+message ChatMessage {
+    string sender = 1;
+    string recipient = 2;
+    string message = 3;
+    string timestamp = 4; // Optional: could be server-generated
+    string message_id = 5;
+}
+
+message MessageResponse {
+    bool success = 1;
+    string message_id = 2;
+}
+
+// --------- Undelivered Messages ---------
+message UndeliveredMessagesRequest {
+    string username = 1;
+    int32 max_messages = 2;  // Optional limit
+}
+
+message UndeliveredMessagesResponse {
+    repeated ChatMessage messages = 1;
+}
+
+// --------- Message Deletion ---------
+message DeleteMessageRequest {
+    string message_id = 1;
+    string requesting_user = 2;
+}
+
+message DeleteMessageResponse {
+    bool success = 1;
+}
+
+// --------- User Search ---------
+message SearchUsersRequest {
+    string wildcard = 1;
+}
+
+message SearchUsersResponse {
+    repeated string usernames = 1;
+}
