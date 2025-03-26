@@ -1,8 +1,4 @@
-Below is a complete README.md file in plain text Markdown. You can copy and paste this directly into a file named `README.md`.
 
----
-
-```markdown
 # Distributed Chat Application
 
 This project is a distributed chat system built using gRPC and SQLite for persistence. The system consists of one or more servers that support leader election, peer discovery, message replication, and persistence, and a client (with a Tkinter GUI) that connects to the primary server to perform user authentication, message sending/receiving, offline message retrieval, and user searches.
