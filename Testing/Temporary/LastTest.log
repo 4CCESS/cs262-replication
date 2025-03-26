@@ -1,10 +1,10 @@
-Start testing: Mar 26 11:46 EDT
+Start testing: Mar 26 14:46 EDT
 ----------------------------------------------------------
 1/1 Testing: ChatServiceTests
 1/1 Test: ChatServiceTests
 Command: "/home/jesse/CS2620/DE4/test_chat"
 Directory: /home/jesse/CS2620/DE4
-"ChatServiceTests" start time: Mar 26 11:46 EDT
+"ChatServiceTests" start time: Mar 26 14:46 EDT
 Output:
 ----------------------------------------------------------
 [==========] Running 4 tests from 1 test suite.
@@ -24,11 +24,11 @@ Output:
 [==========] 4 tests from 1 test suite ran. (0 ms total)
 [  PASSED  ] 4 tests.
 <end of output>
-Test time =   0.01 sec
+Test time =   0.27 sec
 ----------------------------------------------------------
 Test Passed.
-"ChatServiceTests" end time: Mar 26 11:46 EDT
+"ChatServiceTests" end time: Mar 26 14:46 EDT
 "ChatServiceTests" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-End testing: Mar 26 11:46 EDT
+End testing: Mar 26 14:46 EDT

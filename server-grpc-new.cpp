@@ -20,7 +20,7 @@
 // Secure authentication suite (for password hashing, etc.)
 #include "user_auth/user_auth.h"
 
-// ------------------ Using Declarations ------------------
+// ------------------ Using gRPC Declarations ------------------
 
 // Basic gRPC types.
 using grpc::Server;
@@ -72,7 +72,7 @@ using chat::DeliveryRequest;
 using chat::DeliveryResponse;
 
 // ----- State Synchronization -----
-// GetFullState is defined under ChatService in your proto.
+// GetFullState is defined under ChatService in proto, uses these messages.
 using chat::FullState;
 using chat::UserState;
 using chat::MessageState;
@@ -259,7 +259,7 @@ bool loadData() {
 }
 
 /**
- * persistUser - Persists a user record into the SQLite database.
+ * persistUser - Places a user record into the SQLite database for persistence.
  */
 bool persistUser(const std::string& username, const UserInfo& user) {
     const char* sql = "INSERT OR REPLACE INTO users (username, password, isOnline, delivery_address) VALUES (?, ?, ?, ?);";
@@ -279,7 +279,7 @@ bool persistUser(const std::string& username, const UserInfo& user) {
 }
 
 /**
- * persistMessage - Persists a message record into the SQLite database.
+ * persistMessage - Place a message record into the SQLite database for persistence.
  */
 bool persistMessage(int id, const Message& msg) {
     const char* sql = "INSERT OR REPLACE INTO messages (id, content, sender, recipient, delivered) VALUES (?, ?, ?, ?, ?);";
@@ -316,7 +316,7 @@ bool removeMessage(int id) {
     return rc == SQLITE_DONE;
 }
 
-// ------------------ New: State Synchronization Functions ------------------
+// ------------------ State Synchronization Functions ------------------
 
 /**
  * GetFullState RPC Implementation.
@@ -365,6 +365,8 @@ bool syncStateFromLeader(const std::string &leaderAddress) {
         std::cerr << "[DEBUG] Failed to sync state from leader.\n";
         return false;
     }
+
+    // load users from response into global user_map
     {
         std::lock_guard<std::mutex> lock(user_mutex);
         user_map.clear();
@@ -378,6 +380,8 @@ bool syncStateFromLeader(const std::string &leaderAddress) {
             persistUser(us.username(), ui);
         }
     }
+
+    // load messages from response into global message map
     {
         std::lock_guard<std::mutex> lock(messages_mutex);
         messages.clear();
@@ -423,6 +427,7 @@ uint32_t computeScoreFromAddress(const std::string &address) {
     return sum;
 }
 
+// No current function, may be developed in future
 void synchronizeReplicationLogs() {
     std::cout << "[DEBUG] Synchronizing replication logs...\n";
     std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -444,7 +449,7 @@ void updateLeaderInfo(const std::string &leaderId, int electionRound) {
 }
 
 /**
- * replicateUpdateToBackups - Replicates a ReplicationUpdate to all backup peers.
+ * replicateUpdateToBackups - Sends a ReplicationUpdate to all backup peers.
  * On backup servers, the update is also persisted.
  */
 bool replicateUpdateToBackups(const ReplicationUpdate &update) {
@@ -471,6 +476,9 @@ bool replicateUpdateToBackups(const ReplicationUpdate &update) {
     return (ackCount >= quorum);
 }
 
+/**
+ * monitorLeaderHeartbeat - Thread used to ensure leader connectivity.
+ */
 void monitorLeaderHeartbeat(const std::vector<std::string>& peer_addresses,
                             int heartbeatIntervalSeconds,
                             int maxMissedHeartbeats) {
@@ -483,10 +491,14 @@ void monitorLeaderHeartbeat(const std::vector<std::string>& peer_addresses,
             std::lock_guard<std::mutex> lock(leader_mutex);
             leader = currentLeader;
         }
+
+        // short buffer in case current server just selected as leader
         if (leader.empty() || leader == self_id) {
             std::this_thread::sleep_for(std::chrono::seconds(heartbeatIntervalSeconds));
             continue;
         }
+        
+        // send heartbeat and receive ack
         auto channel = grpc::CreateChannel(leader, grpc::InsecureChannelCredentials());
         auto stub = ISMService::NewStub(channel);
         HeartbeatRequest hbReq;
@@ -501,6 +513,8 @@ void monitorLeaderHeartbeat(const std::vector<std::string>& peer_addresses,
             std::cout << "[DEBUG] Missed heartbeat from leader " << leader 
                       << " (missed count: " << missedCount << ")\n";
         }
+
+        // detect failure, initate election
         if (missedCount >= maxMissedHeartbeats) {
             std::cout << "[DEBUG] Leader failure detected via heartbeat!\n";
             electionInProgress.store(true);
@@ -514,10 +528,14 @@ void monitorLeaderHeartbeat(const std::vector<std::string>& peer_addresses,
     }
 }
 
+/**
+ * performDiscovery - Contact all active servers from static list.
+ */
 void performDiscovery(const std::vector<std::string>& peer_addresses) {
     for (const auto &address : peer_addresses) {
-        if (address == self_address)
+        if (address == self_address) // don't count self as peer
             continue;
+
         auto channel = grpc::CreateChannel(address, grpc::InsecureChannelCredentials());
         std::unique_ptr<ISMService::Stub> stub = ISMService::NewStub(channel);
         DiscoveryPing ping;
@@ -525,6 +543,8 @@ void performDiscovery(const std::vector<std::string>& peer_addresses) {
         DiscoveryResponse response;
         ClientContext context;
         Status status = stub->DiscoverPeer(&context, ping, &response);
+
+        // add peer if responsive, update leader if necessary
         if (status.ok()) {
             PeerInfo info;
             info.id = response.receiver_id();
@@ -545,6 +565,9 @@ void performDiscovery(const std::vector<std::string>& peer_addresses) {
     }
 }
 
+/**
+ * waitForInitialPeers - Ensure 3 servers connected for system initalization.
+ */
 void waitForInitialPeers(const std::vector<std::string>& peer_addresses) {
     while (true) {
         performDiscovery(peer_addresses);
@@ -565,9 +588,15 @@ void waitForInitialPeers(const std::vector<std::string>& peer_addresses) {
     }
 }
 
+/**
+ * performElection - Elect leader with lowest score, perform internal updates/broadcast
+ *      Followed by new discovery to refresh network state.
+ */
 void performElection(const std::vector<std::string>& peer_addresses, uint32_t self_score, int current_election_round) {
     std::unordered_map<std::string, uint32_t> scores;
     scores[self_id] = self_score;
+
+    // Get all peer scores
     for (const auto &address : peer_addresses) {
         if (address == self_address)
             continue;
@@ -588,6 +617,7 @@ void performElection(const std::vector<std::string>& peer_addresses, uint32_t se
             std::cout << "[DEBUG] Failed to send score to peer " << address << "\n";
         }
     }
+    // Compare scores and find lowest, associate to leader
     uint32_t min_score = self_score;
     std::string elected_leader = self_id;
     for (const auto &pair : scores) {
@@ -598,11 +628,15 @@ void performElection(const std::vector<std::string>& peer_addresses, uint32_t se
     }
     std::cout << "[DEBUG] Election complete. Elected leader: " << elected_leader 
               << " with score " << min_score << "\n";
+
+    // set roles and update vars
     if (elected_leader == self_id)
         self_role = 1;
     else
         self_role = 2;
     updateLeaderInfo(elected_leader, current_election_round);
+
+    // advertise if leader
     if (self_role == 1) {
         for (const auto &address : peer_addresses) {
             if (address == self_address)
@@ -627,6 +661,8 @@ void performElection(const std::vector<std::string>& peer_addresses, uint32_t se
         std::lock_guard<std::mutex> lock(peers_mutex);
         discovered_peers.clear();
     }
+
+    // redo discovery
     std::cout << "[DEBUG] Cleared discovered peers after election. Re-discovering peers...\n";
     performDiscovery(peer_addresses);
 }
@@ -638,6 +674,10 @@ void performElection(const std::vector<std::string>& peer_addresses, uint32_t se
  */
 class ISMServiceImpl final : public ISMService::Service {
 public:
+
+    /**
+     * DiscoverPeer - Respond to discovery ping.
+     */
     Status DiscoverPeer(ServerContext* context, const DiscoveryPing* request,
                         DiscoveryResponse* response) override {
         response->set_receiver_id(self_id);
@@ -648,8 +688,14 @@ public:
         return Status::OK;
     }
     
+    /**
+    * ReplicateUpdate - Send update from client write to backup servers
+    *       Ensure persistent on server
+    */
     Status ReplicateUpdate(ServerContext* context, const ReplicationUpdate* request,
                        UpdateAck* response) override {
+
+        // user-related (i.e. registration)
         if (request->update_type() == chat::USER_ADD) {
             std::lock_guard<std::mutex> lock(user_mutex);
             std::string username = request->username();
@@ -661,6 +707,7 @@ public:
             std::cout << "[DEBUG] Replicated USER_ADD/UPDATE for " << username << "\n";
             persistUser(username, u);
         }
+        // message send
         else if (request->update_type() == chat::NEW_MESSAGE) {
             int id = request->seq();
             {
@@ -694,6 +741,7 @@ public:
                 }
             }
         }
+        // message deletion
         else if (request->update_type() == chat::DELETE_MESSAGE) {
             int id = std::stoi(request->message_id());
             std::lock_guard<std::mutex> lock(messages_mutex);
@@ -707,7 +755,9 @@ public:
     }
 
 
-    
+    /**
+    * Heartbeat - heartbeack acknowledgement
+    */
     Status Heartbeat(ServerContext* context, const HeartbeatRequest* request,
                      HeartbeatResponse* response) override {
         response->set_alive(true);
@@ -720,12 +770,18 @@ public:
  */
 class ElectionServiceImpl final : public ElectionService::Service {
 public:
+    /**
+    * SendScore - acknowledge score send from other server
+    */
     Status SendScore(ServerContext* context, const ScoreRequest* request,
                      ScoreResponse* response) override {
         response->set_received(true);
         return Status::OK;
     }
     
+    /**
+    * AnnounceLeader - acknowledge leader announcement broadcast
+    */
     Status AnnounceLeader(ServerContext* context, const LeaderAnnouncement* request,
                           Ack* response) override {
         std::cout << "[DEBUG] Received leader announcement: " << request->leader_id() 
@@ -741,6 +797,10 @@ public:
  */
 class ChatServiceImpl final : public ChatService::Service {
 public:
+
+    /**
+     * GetLeaderInfo - reply to leader info inquiry from client
+     */
     Status GetLeaderInfo(ServerContext* context, const LeaderRequest* request,
                          LeaderResponse* response) override {
         std::lock_guard<std::mutex> lock(leader_mutex);
@@ -749,9 +809,12 @@ public:
         return Status::OK;
     }
     
-    // Full state synchronization RPC.
+    /**
+    * GetFullState - send full state to requesting server
+    */
     Status GetFullState(ServerContext* context, const google::protobuf::Empty* request,
                         FullState* response) override {
+        // send user info
         {
             std::lock_guard<std::mutex> lock(user_mutex);
             for (const auto &entry : user_map) {
@@ -762,6 +825,7 @@ public:
                 userState->set_delivery_address(entry.second.delivery_address);
             }
         }
+        // send message info
         {
             std::lock_guard<std::mutex> lock(messages_mutex);
             for (const auto &msgPair : messages) {
@@ -775,7 +839,9 @@ public:
         }
         return Status::OK;
     }
-    
+    /**
+    * Register - create new user profile and distribute to backups
+    */
     Status Register(ServerContext* context, const RegisterRequest* request,
                     RegisterResponse* response) override {
         waitForElectionToComplete();
@@ -787,6 +853,7 @@ public:
             response->set_message("Username already exists.");
             return Status::OK;
         }
+        // create new user and store to db
         UserInfo newUser;
         newUser.password = argon2HashPassword(request->password());
         newUser.isOnline = false;
@@ -797,6 +864,7 @@ public:
             response->set_message("Failed to persist user.");
             return Status::OK;
         }
+        // send info to all backups
         ReplicationUpdate update;
         update.set_update_type(chat::USER_ADD);
         update.set_username(username);
@@ -815,6 +883,9 @@ public:
         return Status::OK;
     }
     
+    /**
+    * Login - authenticate user and update with IP info for message delivery
+    */
     Status Login(ServerContext* context, const LoginRequest* request,
                  LoginResponse* response) override {
         std::cout << "[DEBUG] Login called for username: " << request->username() << "\n";
@@ -826,9 +897,11 @@ public:
             response->set_message("Invalid username or password.");
             return Status::OK;
         }
+        // update user info
         it->second.isOnline = true;
         it->second.delivery_address = request->delivery_address();
         persistUser(username, it->second);
+        // send update to backups
         ReplicationUpdate update;
         update.set_update_type(chat::USER_ADD);
         update.set_username(username);
@@ -847,7 +920,7 @@ public:
         response->set_message("Login successful.");
 
 
-        // Only include messages where:
+        // Get message history. Only include messages where:
         //   - The sender is the user, OR
         //   - The recipient is the user AND the message is marked as delivered.
         {
@@ -885,7 +958,9 @@ public:
         return Status::OK;
     }
     
-    // New Logout RPC.
+    /**
+    * Logout - change user status and address, send update to backups
+    */
     Status Logout(ServerContext* context, const LoginRequest* request,
                   RegisterResponse* response) override {
         std::cout << "[DEBUG] Logout called for username: " << request->username() << "\n";
@@ -897,9 +972,11 @@ public:
             response->set_message("User not found.");
             return Status::OK;
         }
+        // update user info and store to db
         it->second.isOnline = false;
         it->second.delivery_address = "";
         persistUser(username, it->second);
+        // send to all backups
         ReplicationUpdate update;
         update.set_update_type(chat::USER_ADD);
         update.set_username(username);
@@ -918,6 +995,9 @@ public:
         return Status::OK;
     }
     
+    /**
+    * RetrieveUndeliveredMessages - send up to requested number of undelivered messages. 
+    */
     Status RetrieveUndeliveredMessages(ServerContext* context, const UndeliveredMessagesRequest* request,
                                    UndeliveredMessagesResponse* response) override {
         std::lock_guard<std::mutex> lock(user_mutex);
@@ -926,13 +1006,13 @@ public:
             return Status(grpc::NOT_FOUND, "User not found.");
         int max_messages = request->max_messages();
         int count = 0;
-        // We'll collect the messages we are about to deliver.
+        // collect the messages we are about to deliver.
         std::vector<Message> retrievedMessages;
-        // Iterate through the user's offline messages (which have not yet been delivered).
+        // iterate through the user's offline messages (which have not yet been delivered).
         for (const auto &msg : it->second.offlineMessages) {
             if (count >= max_messages)
                 break;
-            // Add the message to the response.
+            // add the message to the response.
             ChatMessage* chat_msg = response->add_messages();
             chat_msg->set_sender(msg.sender);
             chat_msg->set_recipient(msg.recipient);
@@ -942,7 +1022,7 @@ public:
             retrievedMessages.push_back(msg);
             count++;
         }
-        // Now update each retrieved message to be marked as delivered.
+        // now update each retrieved message to be marked as delivered.
         {
             std::lock_guard<std::mutex> msgLock(messages_mutex);
             for (const auto &msg : retrievedMessages) {
@@ -975,6 +1055,9 @@ public:
         return Status::OK;
     }
 
+    /**
+    * DeleteMessage - find message and remove if available and requested by sender
+    */
     Status DeleteMessage(ServerContext* context, const DeleteMessageRequest* request,
                          DeleteMessageResponse* response) override {
         waitForElectionToComplete();
@@ -1006,6 +1089,9 @@ public:
         return Status::OK;
     }
     
+    /**
+    * SearchUsers - return list of users who have wildcard in username
+    */
     Status SearchUsers(ServerContext* context, const SearchUsersRequest* request,
                        SearchUsersResponse* response) override {
         std::lock_guard<std::mutex> lock(user_mutex);
@@ -1016,6 +1102,9 @@ public:
         return Status::OK;
     }
     
+    /**
+    * SendMessage - receive message and store to db, deliver immediately if possible
+    */
     Status SendMessage(ServerContext* context, const ChatMessage* request,
                    MessageResponse* response) override {
         // Extract details from the request.
@@ -1193,6 +1282,7 @@ int main(int argc, char** argv) {
     std::thread serverThread(RunServer, self_address);
     std::this_thread::sleep_for(std::chrono::seconds(1));  // Allow server to start.
     
+    // initialization role
     if (self_role == 0) {
         std::cout << "[DEBUG] Bootstrapping: waiting for initial 3 servers (role 0)...\n";
         waitForInitialPeers(peer_addresses);
@@ -1200,8 +1290,9 @@ int main(int argc, char** argv) {
         synchronizeReplicationLogs();
         performElection(peer_addresses, self_score, current_election_round);
         electionInProgress.store(false);
+
+    // For a new server joining with role 3: perform discovery, then sync state from leader.
     } else if (self_role == 3) {
-        // For a new server joining with role 3: perform discovery, then sync state from leader.
         performDiscovery(peer_addresses);
         std::string leaderFound;
         {
@@ -1224,7 +1315,7 @@ int main(int argc, char** argv) {
             }
         }
     } else {
-        // For backups with role 2.
+        // For backups with role 2. Can start elections, assumed up to date
         performDiscovery(peer_addresses);
         bool leaderFound = false;
         {

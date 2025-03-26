@@ -1,2 +1,2 @@
-ChatServiceTests 1 0.00950818
+ChatServiceTests 2 0.1334
 ---

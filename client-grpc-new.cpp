@@ -353,6 +353,7 @@ void RunDeliveryService(const std::string &deliveryAddress) {
     DeliveryServiceImpl service;
     ServerBuilder builder;
     // Listen on the provided delivery address.
+
     builder.AddListeningPort(deliveryAddress, grpc::InsecureServerCredentials());
     builder.RegisterService(&service);
     std::unique_ptr<Server> server(builder.BuildAndStart());
