@@ -267,13 +267,7 @@ Check the test output for any failures or errors.
   - *SQLite Persistence Errors*: Confirm that SQLite3 is installed and the server has permission to write to its database file.  
   - *State Synchronization Problems*: Ensure that the leader is reachable and that its full state is transmitted correctly to new servers.
 
-## License
-
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-```
 
 ---
 
 This README provides comprehensive instructions on installing dependencies, building the project, running both the server and client (with GUI), an overview of the architecture, replication/persistence details, state synchronization, unit testing, troubleshooting, and licensing.
-
-Feel free to adjust sections as needed for your project.
