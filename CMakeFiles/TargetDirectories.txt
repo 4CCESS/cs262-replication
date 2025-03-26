@@ -1,0 +1,7 @@
+/home/jesse/CS2620/DE4/CMakeFiles/proto_files.dir
+/home/jesse/CS2620/DE4/CMakeFiles/server.dir
+/home/jesse/CS2620/DE4/CMakeFiles/client.dir
+/home/jesse/CS2620/DE4/CMakeFiles/test_chat.dir
+/home/jesse/CS2620/DE4/CMakeFiles/test.dir
+/home/jesse/CS2620/DE4/CMakeFiles/edit_cache.dir
+/home/jesse/CS2620/DE4/CMakeFiles/rebuild_cache.dir

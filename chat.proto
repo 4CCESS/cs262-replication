@@ -2,85 +2,233 @@ syntax = "proto3";
 
 package chat;
 
+import "google/protobuf/empty.proto";
 
-// Define the Chat Service
-service ChatService {
-    // Account Management
-    rpc Register (RegisterRequest) returns (RegisterResponse);
-    rpc Login (LoginRequest) returns (LoginResponse);
 
-    // Messaging
-    rpc RetrieveUndeliveredMessages (UndeliveredMessagesRequest) returns (UndeliveredMessagesResponse);
-    rpc DeleteMessage (DeleteMessageRequest) returns (DeleteMessageResponse);
-
-    // Real-time Chat (Bidirectional Streaming)
-    rpc ChatStream (stream ChatMessage) returns (stream ChatMessage);
-
-    // User Search by Wildcard
-    rpc SearchUsers (SearchUsersRequest) returns (SearchUsersResponse);
+// ---------- Discovery and Replication Service ----------
+service ISMService {
+    // Discovery: A node sends a ping; the remote node responds with its ID, role, etc.
+    rpc DiscoverPeer(DiscoveryPing) returns (DiscoveryResponse);
+    // Replication: The leader sends an update to a backup.
+    rpc ReplicateUpdate(ReplicationUpdate) returns (UpdateAck);
+    // Heartbeat: Used by backups to check that the leader is alive.
+    rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
 }
 
-// --------- Account Management Messages ---------
+message DiscoveryPing {
+  string sender_id = 1;
+}
+
+message DiscoveryResponse {
+  string receiver_id = 1;
+  int32 role = 2;
+  int32 election_cycle = 3;
+}
+
+enum UpdateType {
+    UNKNOWN = 0;
+    USER_ADD = 1;
+    NEW_MESSAGE = 2;
+    DELETE_MESSAGE = 3;
+  }
+  
+  message ReplicationUpdate {
+    UpdateType update_type = 1;
+    // For USER_ADD:
+    string username = 2;
+    string password = 3; // hashed password.]
+    bool isOnline = 10;
+    string delivery_address = 11;
+    // For NEW_MESSAGE:
+    string message_id = 4;
+    string sender = 5;
+    string recipient = 6;
+    string message = 7;
+    string timestamp = 8;
+    // For DELETE_MESSAGE, message_id is reused.
+    uint32 seq = 9; // Sequence number.
+    bool delivered = 12;
+  }
+  
+  message UpdateAck {
+    bool success = 1;
+    uint32 seq = 2;
+  }
+
+  message HeartbeatRequest {
+    string sender_id = 1;
+  }
+  
+  message HeartbeatResponse {
+    bool alive = 1;
+  }
+
+// ---------- Election Service for Deterministic Leader Election ----------
+service ElectionService {
+  rpc SendScore(ScoreRequest) returns (ScoreResponse);
+  rpc AnnounceLeader(LeaderAnnouncement) returns (Ack);
+}
+
+message ScoreRequest {
+  string sender_id = 1;
+  uint32 score = 2;
+  int32 election_round = 3;
+}
+
+message ScoreResponse {
+  bool received = 1;
+}
+
+message LeaderAnnouncement {
+  string leader_id = 1;
+  uint32 leader_score = 2;
+  int32 election_round = 3;
+}
+
+message Ack {
+  bool success = 1;
+}
+
+// ---------- Leader Discovery for Clients ----------
+service ChatService {
+  rpc GetLeaderInfo(LeaderRequest) returns (LeaderResponse);
+  
+  // Account management and messaging.
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Login(LoginRequest) returns (LoginResponse);
+  rpc Logout(LoginRequest) returns (RegisterResponse);
+  rpc RetrieveUndeliveredMessages(UndeliveredMessagesRequest) returns (UndeliveredMessagesResponse);
+  rpc DeleteMessage(DeleteMessageRequest) returns (DeleteMessageResponse);
+  rpc SearchUsers(SearchUsersRequest) returns (SearchUsersResponse);
+
+  // Messaging: separate RPCs for sending and acknowledging delivery.
+  
+  // (1) The client sends a message and receives a send acknowledgment.
+  rpc SendMessage(ChatMessage) returns (MessageResponse);
+
+  rpc GetFullState(google.protobuf.Empty) returns (FullState);
+
+}
+
+message LeaderRequest {
+  string client_id = 1;
+}
+
+message LeaderResponse {
+  string leader_address = 1;
+  int32 election_round = 2;
+}
+
+// ---------- Account Management ----------
 message RegisterRequest {
-    string username = 1;
-    string password = 2;
+  string username = 1;
+  string password = 2;
 }
 
 message RegisterResponse {
-    bool success = 1;
-    string message = 2;  // "User created successfully" or "Username already exists"
+  bool success = 1;
+  string message = 2;
 }
 
 message LoginRequest {
-    string username = 1;
-    string password = 2;
+  string username = 1;
+  string password = 2;
+  string delivery_Address = 3;
 }
 
 message LoginResponse {
-    bool success = 1;
-    string session_token = 2;  // A token for session management
-    string message = 3;  // Error message if failed
+  bool success = 1;
+  string session_token = 2;
+  string message = 3;
+  repeated ChatMessage messages = 4;
 }
 
-// --------- Chat Messaging ---------
+// ---------- Chat Messaging ----------
+
 message ChatMessage {
+    // For sending messages, the client fills this message.
+    // No explicit type field is needed here because SendMessage always implies "send".
     string sender = 1;
     string recipient = 2;
     string message = 3;
-    string timestamp = 4; // Optional: could be server-generated
+    string timestamp = 4;
     string message_id = 5;
-}
-
+  }
+  
 message MessageResponse {
-    bool success = 1;
-    string message_id = 2;
+  bool success = 1;
+  string message_id = 2;
+  string message = 3;
 }
 
-// --------- Undelivered Messages ---------
+// ---------- Delivery Service ----------
+// This service is implemented by the client.
+// When the recipient is active, the primary server calls DeliverMessage on the client.
+service DeliveryService {
+    rpc DeliverMessage(DeliveryRequest) returns (DeliveryResponse);
+  }
+  
+  message DeliveryRequest {
+    string sender = 1;
+    string recipient = 2;
+    string message = 3;
+    string timestamp = 4;
+    string message_id = 5;
+  }
+  
+  message DeliveryResponse {
+    bool success = 1;
+    string message = 2;
+  }
+
+
+// ---------- Undelivered Messages ----------
 message UndeliveredMessagesRequest {
-    string username = 1;
-    int32 max_messages = 2;  // Optional limit
+  string username = 1;
+  int32 max_messages = 2;
 }
 
 message UndeliveredMessagesResponse {
-    repeated ChatMessage messages = 1;
+  repeated ChatMessage messages = 1;
 }
 
-// --------- Message Deletion ---------
+// ---------- Message Deletion ----------
 message DeleteMessageRequest {
-    string message_id = 1;
-    string requesting_user = 2;
+  string message_id = 1;
+  string requesting_user = 2;
 }
 
 message DeleteMessageResponse {
-    bool success = 1;
+  bool success = 1;
 }
 
-// --------- User Search ---------
+// ---------- User Search ----------
 message SearchUsersRequest {
-    string wildcard = 1;
+  string wildcard = 1;
 }
 
 message SearchUsersResponse {
-    repeated string usernames = 1;
+  repeated string usernames = 1;
 }
+
+// ---------- State Synchronization for New Servers ----------
+message UserState {
+    string username = 1;
+    string password = 2;
+    bool isOnline = 3;
+    string delivery_address = 4;
+}
+
+message MessageState {
+  int32 id = 1;
+  string content = 2;
+  string sender = 3;
+  string recipient = 4;
+  bool delivered = 5;
+}
+
+message FullState {
+  repeated UserState users = 1;
+  repeated MessageState messages = 2;
+}
+

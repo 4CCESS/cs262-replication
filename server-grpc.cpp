@@ -12,13 +12,31 @@
 // Secure authentication suite
 #include "user_auth/user_auth.h"
 
-// Convenience using declarations.
+// GRPC DECLARATIONS
+// Basic gRPC types.
 using grpc::Server;
 using grpc::ServerBuilder;
 using grpc::ServerContext;
 using grpc::Status;
 using grpc::ServerReaderWriter;
 
+// ----- ISM Service (Discovery) -----
+using chat::ISMService;
+using chat::DiscoveryPing;
+using chat::DiscoveryResponse;
+
+// ----- Election Service -----
+using chat::ElectionService;
+using chat::ScoreRequest;
+using chat::ScoreResponse;
+using chat::LeaderAnnouncement;
+using chat::Ack;
+
+// ----- Leader Discovery (part of ChatService) -----
+using chat::LeaderRequest;
+using chat::LeaderResponse;
+
+// ----- Chat Service and Related Messages -----
 using chat::ChatService;
 using chat::RegisterRequest;
 using chat::RegisterResponse;
@@ -33,6 +51,8 @@ using chat::DeleteMessageResponse;
 using chat::SearchUsersRequest;
 using chat::SearchUsersResponse;
 
+// ------------------ Utility Function ------------------
+
 // Helper function to read an entire file into a string.
 std::string ReadFile(const std::string& filename) {
     std::ifstream file(filename);
@@ -45,7 +65,50 @@ std::string ReadFile(const std::string& filename) {
     return buffer.str();
 }
 
-// In-memory data structures for messages and users.
+// Load peer addresses from a text file (one address per line).
+std::vector<std::string> loadPeerAddresses(const std::string& filename) {
+    std::vector<std::string> addresses;
+    std::ifstream file(filename);
+    if (!file.is_open()){
+        std::cerr << "[ERROR] Unable to open " << filename << "\n";
+        return addresses;
+    }
+    std::string line;
+    while (std::getline(file, line)) {
+        if (!line.empty()) {
+            addresses.push_back(line);
+        }
+    }
+    return addresses;
+}
+
+// A simple function to compute a numeric "score" from an address.
+// Here we simply sum the ASCII values of all characters.
+uint32_t computeScoreFromAddress(const std::string& address) {
+    uint32_t sum = 0;
+    for (char c : address) {
+        sum += static_cast<uint32_t>(c);
+    }
+    return sum;
+}
+
+// ------------------ Global Variables for Discovery/Election ------------------
+
+std::string self_address;
+std::string self_id;   // For simplicity, we'll use self_address as our unique ID.
+int self_role;         // 3 = new server, 2 = candidate, 1 = leader.
+
+// Structure to store discovered peer info.
+struct PeerInfo {
+    std::string id;
+    int role;          // The peer's reported role.
+    int election_cycle;
+};
+
+std::mutex peers_mutex;
+std::unordered_map<std::string, PeerInfo> discovered_peers;
+
+// ------------------ Chat Data Structures ------------------
 struct Message {
     std::string id;
     std::string content;
@@ -70,6 +133,113 @@ int messageCounter = 0;
 // Global mapping for active streams.
 std::mutex stream_mutex;
 std::unordered_map<std::string, ServerReaderWriter<ChatMessage, ChatMessage>*> activeStreams;
+
+// ------------------ Discovery and Election Functions ------------------
+
+// Perform discovery: for each peer (except self), call DiscoverPeer RPC.
+void performDiscovery(const std::vector<std::string>& peer_addresses) {
+    for (const auto& address : peer_addresses) {
+        if (address == self_address) continue; // Skip self.
+        auto channel = grpc::CreateChannel(address, grpc::InsecureChannelCredentials());
+        std::unique_ptr<ISMService::Stub> stub = ISMService::NewStub(channel);
+        
+        DiscoveryPing ping;
+        ping.set_sender_id(self_id);
+        DiscoveryResponse response;
+        grpc::ClientContext context;
+        grpc::Status status = stub->DiscoverPeer(&context, ping, &response);
+        if (status.ok()) {
+            PeerInfo info;
+            info.id = response.receiver_id();
+            info.role = response.role();         // Reported role from peer.
+            info.election_cycle = response.election_cycle();
+            {
+                std::lock_guard<std::mutex> lock(peers_mutex);
+                discovered_peers[address] = info;
+            }
+            std::cout << "[DEBUG] Discovered peer " << address 
+                      << " with role " << info.role 
+                      << " and election cycle " << info.election_cycle << "\n";
+        } else {
+            std::cout << "[DEBUG] Failed to contact peer " << address << "\n";
+        }
+    }
+}
+
+// Conduct a simple deterministic election using our computed score.
+void performElection(const std::vector<std::string>& peer_addresses, uint32_t self_score, int current_election_round) {
+    std::unordered_map<std::string, uint32_t> scores;
+    scores[self_id] = self_score;
+    
+    // For each peer, send our score using ElectionService::SendScore RPC.
+    for (const auto& address : peer_addresses) {
+        if (address == self_address) continue;
+        auto channel = grpc::CreateChannel(address, grpc::InsecureChannelCredentials());
+        std::unique_ptr<ElectionService::Stub> stub = ElectionService::NewStub(channel);
+        
+        ScoreRequest req;
+        req.set_sender_id(self_id);
+        req.set_score(self_score);
+        req.set_election_round(current_election_round);
+        
+        ScoreResponse resp;
+        grpc::ClientContext context;
+        grpc::Status status = stub->SendScore(&context, req, &resp);
+        if (status.ok() && resp.received()) {
+            // For simplicity, we simulate the peer's score by computing it from its address.
+            uint32_t peer_score = computeScoreFromAddress(address);
+            scores[address] = peer_score;
+            std::cout << "[DEBUG] Received score " << peer_score << " from peer " << address << "\n";
+        } else {
+            std::cout << "[DEBUG] Failed to send score to peer " << address << "\n";
+        }
+    }
+    
+    // Determine the lowest score.
+    uint32_t min_score = self_score;
+    std::string elected_leader = self_id;
+    for (const auto& pair : scores) {
+        if (pair.second < min_score) {
+            min_score = pair.second;
+            elected_leader = pair.first;
+        }
+    }
+    
+    std::cout << "[DEBUG] Election complete. Elected leader: " << elected_leader 
+              << " with score " << min_score << "\n";
+    
+    // Update our role based on the election result.
+    if (elected_leader == self_id) {
+        self_role = 1; // Become leader.
+    } else {
+        self_role = 2; // Become candidate/follower.
+    }
+    
+    // If we are the leader, broadcast our identity using AnnounceLeader.
+    if (self_role == 1) {
+        for (const auto& address : peer_addresses) {
+            if (address == self_address) continue;
+            auto channel = grpc::CreateChannel(address, grpc::InsecureChannelCredentials());
+            std::unique_ptr<ElectionService::Stub> stub = ElectionService::NewStub(channel);
+            
+            LeaderAnnouncement ann;
+            ann.set_leader_id(self_id);
+            ann.set_leader_score(self_score);
+            ann.set_election_round(current_election_round);
+            
+            Ack ack;
+            grpc::ClientContext context;
+            grpc::Status status = stub->AnnounceLeader(&context, ann, &ack);
+            if (!status.ok() || !ack.success()) {
+                std::cout << "[DEBUG] Failed to announce leadership to peer " << address << "\n";
+            } else {
+                std::cout << "[DEBUG] Announced leadership to peer " << address << "\n";
+            }
+        }
+    }
+}
+
+// ------------------ Chat Service Implementation ------------------
 
 class ChatServiceImpl final : public ChatService::Service {
 public:
@@ -294,6 +464,8 @@ public:
     }
 };
 
+// ------------------ RunServer Function ------------------
+
 void RunServer(const std::string& server_address) {
     ChatServiceImpl service;
     // Configure TLS credentials.
@@ -317,8 +489,67 @@ void RunServer(const std::string& server_address) {
     server->Wait();
 }
 
+// ------------------ Main Function ------------------
+
 int main(int argc, char** argv) {
-    std::string server_address("127.0.0.1:5000");
-    RunServer(server_address);
+    // Expect command-line parameters: self address and initial role.
+    if (argc < 3) {
+        std::cerr << "Usage: " << argv[0] << " <self_address> <role> \n";
+        std::cerr << "Example: " << argv[0] << " 127.0.0.1:5000 3\n";
+        return 1;
+    }
+    self_address = argv[1];
+    self_id = self_address;  // Use the address as our unique ID.
+    self_role = std::atoi(argv[2]); // Default 
+
+    // Load peer addresses from "peers.txt" (addresses only).
+    std::vector<std::string> peer_addresses = loadPeerAddresses("peers.txt");
+    
+    // Compute our score from our own address.
+    uint32_t self_score = computeScoreFromAddress(self_address);
+    int current_election_round = 1;
+    
+    // Perform discovery: ping all known peers.
+    performDiscovery(peer_addresses);
+    
+    // Check if any discovered peer is already leader (role == 1).
+    bool leaderFound = false;
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex);
+        for (const auto& pair : discovered_peers) {
+            if (pair.second.role == 1) {
+                leaderFound = true;
+                std::cout << "[DEBUG] Found leader: " << pair.second.id << "\n";
+                break;
+            }
+        }
+    }
+    
+    // If no leader is found and our initial role is 3, upgrade to candidate (2) if all peers are also role 3.
+    if (!leaderFound && self_role == 3) {
+        bool allPeersAre3 = true;
+        {
+            std::lock_guard<std::mutex> lock(peers_mutex);
+            for (const auto& pair : discovered_peers) {
+                if (pair.second.role != 3) {
+                    allPeersAre3 = false;
+                    break;
+                }
+            }
+        }
+        if (allPeersAre3) {
+            std::cout << "[DEBUG] All discovered peers are role 3. Upgrading self role from 3 to 2.\n";
+            self_role = 2;
+        }
+    }
+    
+    // If no leader was discovered and our role is now candidate (2), conduct an election.
+    if (!leaderFound && self_role == 2) {
+        std::cout << "[DEBUG] No leader found. Starting election...\n";
+        performElection(peer_addresses, self_score, current_election_round);
+    }
+    
+    // Finally, start the ChatService server.
+    RunServer(self_address);
     return 0;
 }

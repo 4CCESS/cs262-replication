@@ -1,0 +1,3 @@
+# Hashes of file build rules.
+d19345f72dafd24c4c6113a819db79a2 CMakeFiles/proto_files
+51cd37f3ba5b6175aa0901d93b1f9085 chat.pb.cc
